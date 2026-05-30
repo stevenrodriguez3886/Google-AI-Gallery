@@ -135,6 +135,8 @@ import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.ui.common.getTaskIconColor
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import com.google.ai.edge.gallery.ui.theme.bodyLargeNarrow
+import com.google.ai.edge.gallery.ui.common.textandvoiceinput.VadStateIndicator
+import com.google.ai.edge.gallery.voice.VoiceEvent
 import java.io.FileInputStream
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
@@ -180,6 +182,11 @@ fun MessageInputText(
   showAudioPicker: Boolean = false,
   showStopButtonWhenInProgress: Boolean = false,
   onImageLimitExceeded: () -> Unit = {},
+  // --- Voice Mode ---
+  onVoiceModeToggleClicked: () -> Unit = {},
+  voiceModeEnabled: Boolean = false,
+  vadState: VoiceEvent? = null,
+  showVoiceModeToggle: Boolean = false,
 ) {
   val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
@@ -262,6 +269,15 @@ fun MessageInputText(
         handleClickRecordAudioClip()
       }
     }
+
+  // Permission request when toggling Voice Mode
+  val voiceModePermissionLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionGranted ->
+      if (permissionGranted) {
+        onVoiceModeToggleClicked()
+      }
+    }
+
 
   // Registers a photo picker activity launcher in single-select mode.
   val pickMedia =
@@ -414,30 +430,73 @@ fun MessageInputText(
                   // A plus button to show a popup menu to add stuff to the chat.
                   Box() {
                     val enableAddButton = !inProgress && !isResettingSession && !modelInitializing
-                    OutlinedIconButton(
-                      enabled = enableAddButton,
-                      onClick = { showAddContentMenu = true },
-                      colors =
-                        IconButtonDefaults.iconButtonColors(
-                          disabledContentColor =
-                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
-                        ),
-                      border =
-                        IconButtonDefaults.outlinedIconButtonBorder(true)
-                          .copy(
-                            brush =
-                              SolidColor(
-                                MaterialTheme.colorScheme.outlineVariant.copy(
-                                  alpha = if (enableAddButton) 1f else 0.1f
-                                )
-                              )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                      OutlinedIconButton(
+                        enabled = enableAddButton,
+                        onClick = { showAddContentMenu = true },
+                        colors =
+                          IconButtonDefaults.iconButtonColors(
+                            disabledContentColor =
+                              MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
                           ),
-                    ) {
-                      Icon(
-                        Icons.Outlined.Add,
-                        contentDescription = stringResource(R.string.cd_add_content_icon),
-                        modifier = Modifier.size(24.dp),
-                      )
+                        border =
+                          IconButtonDefaults.outlinedIconButtonBorder(true)
+                            .copy(
+                              brush =
+                                SolidColor(
+                                  MaterialTheme.colorScheme.outlineVariant.copy(
+                                    alpha = if (enableAddButton) 1f else 0.1f
+                                  )
+                                )
+                            ),
+                      ) {
+                        Icon(
+                          Icons.Outlined.Add,
+                          contentDescription = stringResource(R.string.cd_add_content_icon),
+                          modifier = Modifier.size(24.dp),
+                        )
+                      }
+                      
+                      // Voice Mode Toggle
+                      if (showVoiceModeToggle) {
+                        val handleVoiceToggle = {
+                          if (voiceModeEnabled) {
+                            onVoiceModeToggleClicked()
+                          } else {
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                              onVoiceModeToggleClicked()
+                            } else {
+                              voiceModePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                          }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clickable { handleVoiceToggle() }
+                        ) {
+                            if (voiceModeEnabled && vadState != null) {
+                                VadStateIndicator(vadState = vadState)
+                            } else {
+                                OutlinedIconButton(
+                                    onClick = handleVoiceToggle,
+                                    border = IconButtonDefaults.outlinedIconButtonBorder(true)
+                                        .copy(
+                                            brush = SolidColor(
+                                                MaterialTheme.colorScheme.outlineVariant
+                                            )
+                                        )
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Mic,
+                                        contentDescription = "Enable Voice Mode",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
+                        }
+                      }
                     }
 
                     DropdownMenu(

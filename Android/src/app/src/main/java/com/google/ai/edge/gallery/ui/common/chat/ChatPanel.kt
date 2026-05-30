@@ -114,6 +114,7 @@ import com.google.ai.edge.gallery.ui.common.RotationalLoader
 import com.google.ai.edge.gallery.ui.common.ScrollToBottomButton
 import com.google.ai.edge.gallery.ui.modelmanager.ModelInitializationStatusType
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+import com.google.ai.edge.gallery.ui.llmchat.LlmChatViewModel
 import com.google.ai.edge.gallery.ui.theme.customColors
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.delay
@@ -152,6 +153,12 @@ fun ChatPanel(
 ) {
   val uiState by viewModel.uiState.collectAsState()
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
+
+  // Voice Mode State
+  val llmViewModel = viewModel as? LlmChatViewModel
+  val voiceModeEnabled by (llmViewModel?.voiceModeEnabled?.collectAsState() ?: mutableStateOf(false))
+  val vadState by (llmViewModel?.vadState?.collectAsState() ?: mutableStateOf(null))
+
   val messages = uiState.messagesByModel[selectedModel.name] ?: listOf()
   val modelInitializationStatus = modelManagerUiState.modelInitializationStatus[selectedModel.name]
   val scope = rememberCoroutineScope()
@@ -687,6 +694,10 @@ fun ChatPanel(
           // Hide software keyboard.
           focusManager.clearFocus()
         },
+        onVoiceModeToggleClicked = { llmViewModel?.toggleVoiceMode(selectedModel) },
+        voiceModeEnabled = voiceModeEnabled,
+        vadState = vadState,
+        showVoiceModeToggle = llmViewModel != null,
         onOpenPromptTemplatesClicked = {
           onSendMessage(
             selectedModel,

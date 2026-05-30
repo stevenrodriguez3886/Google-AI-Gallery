@@ -43,7 +43,7 @@ replace it.
 
 The agent MUST perform the following steps before writing any code:
 
-1. Clone: `git clone https://github.com/google-ai-edge/gallery.git`
+1. Clone: `already did this for you`
 2. Working directory for all Android work: `Google-AI-Gallery/Android/src/`
 3. Verify the project builds and runs on a Pixel 9 Pro XL before any modification.
 4. Create a new git branch: `git checkout -b feature/voice-mode`

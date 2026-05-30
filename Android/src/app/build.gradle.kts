@@ -47,6 +47,11 @@ android {
     manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    ndk {
+      abiFilters += listOf("arm64-v8a")
+    }
+
   }
 
   buildTypes {
@@ -67,6 +72,19 @@ android {
   buildFeatures {
     compose = true
     buildConfig = true
+  }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
+  }
+}
+
+androidComponents {
+  onVariants(selector().all()) { variant ->
+    variant.packaging.jniLibs.pickFirsts.add("lib/arm64-v8a/libc++_shared.so")
+    variant.packaging.jniLibs.pickFirsts.add("**/libonnxruntime.so")
   }
 }
 
@@ -124,6 +142,23 @@ dependencies {
   implementation(libs.mcp.kotlin.sdk)
   implementation(libs.ktor.client.android)
   implementation(libs.ktor.client.core)
+  // --- Silero VAD (on-device voice activity detection) ---
+  // Requires JitPack repository. See settings.gradle.kts.
+  implementation(libs.silero.vad)
+  implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+
+  val onnxruntimeExtraction by configurations.creating
+  onnxruntimeExtraction("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+}
+
+val extractOnnxRuntime by tasks.registering(Copy::class) {
+  from({ configurations.getByName("onnxruntimeExtraction").map { zipTree(it) } })
+  into(layout.buildDirectory.dir("onnxruntime"))
+  include("headers/**", "jni/arm64-v8a/libonnxruntime.so")
+}
+
+tasks.named("preBuild") {
+  dependsOn(extractOnnxRuntime)
 }
 
 protobuf {

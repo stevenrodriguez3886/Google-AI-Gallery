@@ -28,6 +28,9 @@ import com.google.ai.edge.gallery.data.SystemPromptRepository
 import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.proto.UserData
 import com.google.ai.edge.gallery.runtime.runtimeHelper
+import com.google.ai.edge.gallery.tts.AudioTrackPlayer
+import com.google.ai.edge.gallery.tts.KokoroTtsEngine
+import com.google.ai.edge.gallery.tts.TextChunkSentinel
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessageAudioClip
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessageError
 import com.google.ai.edge.gallery.ui.common.chat.ChatMessageInfo
@@ -39,6 +42,9 @@ import com.google.ai.edge.gallery.ui.common.chat.ChatMessageWarning
 import com.google.ai.edge.gallery.ui.common.chat.ChatSide
 import com.google.ai.edge.gallery.ui.common.chat.ChatViewModel
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
+import com.google.ai.edge.gallery.voice.VoiceEvent
+import com.google.ai.edge.gallery.voice.VoiceModeController
+import com.google.ai.edge.gallery.voice.VoiceModeMuteSignal
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.Message
@@ -46,8 +52,10 @@ import com.google.ai.edge.litertlm.ToolProvider
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
@@ -58,9 +66,25 @@ open class LlmChatViewModelBase(
   private val systemPromptRepository: SystemPromptRepository? = null,
   userDataDataStore: DataStore<UserData>? = null,
   private val modelFeedbackRepository: Any? = null,
+  // --- Voice Mode Dependencies (optional, injected via LlmChatViewModel) ---
+  protected val kokoroTts: KokoroTtsEngine? = null,
+  protected val audioPlayer: AudioTrackPlayer? = null,
+  protected val voiceController: VoiceModeController? = null,
+  protected val muteSignal: VoiceModeMuteSignal? = null,
 ) : ChatViewModel(userDataDataStore) {
   private val _uiSystemPrompt = MutableStateFlow("")
   val uiSystemPrompt = _uiSystemPrompt.asStateFlow()
+
+  // --- Voice Mode State ---
+  protected val _voiceModeEnabled = MutableStateFlow(false)
+  val voiceModeEnabled: StateFlow<Boolean> = _voiceModeEnabled.asStateFlow()
+
+  protected val _vadState = MutableStateFlow<VoiceEvent>(VoiceEvent.ListeningStopped)
+  val vadState: StateFlow<VoiceEvent> = _vadState.asStateFlow()
+
+  protected val responseAccumulator = StringBuilder()
+  protected var ttsJob: Job? = null
+  protected var voiceEventJob: Job? = null
 
   /**
    * Sets the system prompt in the UI.
@@ -237,6 +261,16 @@ open class LlmChatViewModelBase(
                     latencyMs = latencyMs.toFloat(),
                   )
                 }
+
+                // --- TTS HOOK (additive) ---
+                if (_voiceModeEnabled.value && kokoroTts != null && partialResult.isNotEmpty()) {
+                  responseAccumulator.append(partialResult)
+                  val chunks = TextChunkSentinel.extractCompletedChunks(responseAccumulator)
+                  chunks.forEach { chunk ->
+                    kokoroTts.enqueue(chunk)
+                  }
+                }
+                // --- END TTS HOOK ---
               }
 
               if (firstRun) {
@@ -264,6 +298,16 @@ open class LlmChatViewModelBase(
                     )
                   }
                 }
+                // --- TTS COMPLETION HOOK (additive) ---
+                if (_voiceModeEnabled.value && kokoroTts != null) {
+                  val remaining = responseAccumulator.toString().trim()
+                  if (remaining.isNotBlank()) {
+                    kokoroTts.enqueue(remaining)
+                  }
+                  responseAccumulator.clear()
+                  startTtsPlaybackLoop()
+                }
+                // --- END TTS COMPLETION HOOK ---
                 setInProgress(false)
                 onDone()
               }
@@ -427,6 +471,48 @@ open class LlmChatViewModelBase(
       )
     }
   }
+  protected fun startTtsPlaybackLoop() {
+    if (kokoroTts == null || audioPlayer == null || muteSignal == null) return
+    ttsJob?.cancel()
+    ttsJob = viewModelScope.launch(Dispatchers.IO) {
+      // Signal VAD to mute while TTS is speaking — AEC handles most of this,
+      // but muting eliminates any residual false triggers.
+      muteSignal.setMuted(true)
+      audioPlayer.play()
+
+      // Wait for Kokoro synthesis to produce the first samples before draining.
+      // Cap the wait at 5 seconds to avoid hanging forever if synthesis fails.
+      val synthesisWaitStart = System.currentTimeMillis()
+      while (kokoroTts.available() == 0) {
+        if (System.currentTimeMillis() - synthesisWaitStart > 5000L) {
+          Log.w(TAG, "TTS synthesis timed out after 5s — no audio produced")
+          muteSignal.setMuted(false)
+          return@launch
+        }
+        delay(20)
+      }
+
+      // Now drain until the buffer has been empty for 500ms (25 reads × 20ms).
+      // 500ms is long enough to bridge gaps between synthesized sentences.
+      val chunkBuffer = ShortArray(4096)
+      var consecutiveEmptyReads = 0
+      while (consecutiveEmptyReads < 25) {
+        val read = kokoroTts.popPcm(chunkBuffer, chunkBuffer.size)
+        if (read > 0) {
+          audioPlayer.write(chunkBuffer, read)
+          consecutiveEmptyReads = 0
+        } else {
+          delay(20)
+          consecutiveEmptyReads++
+        }
+      }
+
+      audioPlayer.stop()
+      kokoroTts.reset()
+      muteSignal.setMuted(false)
+      // Voice controller automatically resumes listening after unmute signal.
+    }
+  }
 }
 
 @HiltViewModel
@@ -435,7 +521,80 @@ class LlmChatViewModel
 constructor(
   systemPromptRepository: SystemPromptRepository,
   userDataDataStore: DataStore<UserData>,
-) : LlmChatViewModelBase(systemPromptRepository, userDataDataStore, null)
+  kokoroTts: KokoroTtsEngine,
+  audioPlayer: AudioTrackPlayer,
+  voiceController: VoiceModeController,
+  muteSignal: VoiceModeMuteSignal,
+) : LlmChatViewModelBase(
+  systemPromptRepository,
+  userDataDataStore,
+  null,
+  kokoroTts,
+  audioPlayer,
+  voiceController,
+  muteSignal,
+) {
+  override fun onCleared() {
+    super.onCleared()
+    if (voiceModeEnabled.value) {
+      voiceController?.stopListening()
+    }
+    voiceController?.destroy()
+    audioPlayer?.release()
+    kokoroTts?.destroy()
+  }
+
+  private var activeVoiceModel: Model? = null
+
+  fun toggleVoiceMode(model: Model) {
+    if (_voiceModeEnabled.value) {
+      // Turning off
+      voiceController?.stopListening()
+      voiceEventJob?.cancel()
+      _voiceModeEnabled.value = false
+      activeVoiceModel = null
+    } else {
+      // Turning on
+      activeVoiceModel = model
+      _voiceModeEnabled.value = true
+      startVoiceEventCollection()
+      voiceController?.startListening(viewModelScope)
+    }
+  }
+
+  private fun startVoiceEventCollection() {
+    voiceEventJob = viewModelScope.launch {
+      voiceController?.events?.collect { event ->
+        _vadState.value = event
+        when (event) {
+          is VoiceEvent.UtteranceReady -> {
+            if (event.transcript.isNotBlank()) {
+              Log.d(TAG, "Voice utterance ready: ${event.transcript}")
+              val currentModel = activeVoiceModel ?: return@collect
+              addMessage(
+                model = currentModel,
+                message = ChatMessageText(
+                  content = event.transcript,
+                  side = ChatSide.USER,
+                )
+              )
+              generateResponse(
+                model = currentModel,
+                input = event.transcript,
+                onError = { Log.e(TAG, "Voice inference error: $it") },
+              )
+            }
+          }
+          is VoiceEvent.RecognitionError -> {
+            Log.e(TAG, "Voice recognition error: ${event.code}")
+          }
+          else -> { /* UI state updates handled via _vadState */ }
+        }
+      }
+    }
+  }
+
+}
 
 @HiltViewModel
 class LlmAskImageViewModel

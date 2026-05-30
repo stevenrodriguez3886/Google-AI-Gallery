@@ -17,6 +17,7 @@
 package com.google.ai.edge.gallery
 
 import android.app.Application
+import android.util.Log
 import com.google.ai.edge.gallery.data.DataStoreRepository
 import com.google.ai.edge.gallery.notifications.NotificationScheduleManager
 import com.google.ai.edge.gallery.ui.theme.ThemeSettings
@@ -31,6 +32,13 @@ class GalleryApplication : Application() {
   @Inject lateinit var notificationScheduleManager: NotificationScheduleManager
 
   override fun onCreate() {
+    // Attempt to load GPU delegate before any other initialization.
+    try {
+      System.loadLibrary("LiteRtGpu")
+    } catch (e: UnsatisfiedLinkError) {
+      Log.w("GalleryVoice", "LiteRT GPU delegate unavailable, falling back to CPU: ${e.message}")
+    }
+
     super.onCreate()
     // Initialize the notification schedule manager to load the scheduled notifications from the
     // disk.

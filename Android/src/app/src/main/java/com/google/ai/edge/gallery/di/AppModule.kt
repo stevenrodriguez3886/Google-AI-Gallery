@@ -44,6 +44,11 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
+import com.google.ai.edge.gallery.tts.KokoroTtsEngine
+import java.io.File
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -189,5 +194,91 @@ internal object AppModule {
   @Singleton
   fun provideMoshi(): Moshi {
     return Moshi.Builder().build()
+  }
+
+  // --- Voice Mode Providers ---
+
+  private fun loadVoiceEmbedding(voicesFile: File, voiceName: String): FloatArray {
+    val zipFile = java.util.zip.ZipFile(voicesFile)
+    val entry = zipFile.getEntry("$voiceName.npy") ?: throw IllegalArgumentException("Voice entry $voiceName.npy not found in zip")
+    zipFile.getInputStream(entry).use { inputStream ->
+      val bytes = inputStream.readBytes()
+      val headerLen = (bytes[8].toInt() and 0xFF) or ((bytes[9].toInt() and 0xFF) shl 8)
+      val dataOffset = 10 + headerLen
+      val floatCount = 510 * 256
+      val floatArray = FloatArray(floatCount)
+      val buffer = java.nio.ByteBuffer.wrap(bytes)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      buffer.position(dataOffset)
+      for (i in 0 until floatCount) {
+        floatArray[i] = buffer.float
+      }
+      return floatArray
+    }
+  }
+
+  // Provides KokoroTtsEngine
+  @Provides
+  @Singleton
+  fun provideKokoroTtsEngine(@ApplicationContext context: Context): KokoroTtsEngine {
+    val modelPath = File(context.filesDir, "kokoro-v1.0.int8.onnx")
+    val voicesPath = File(context.filesDir, "voices-v1.0.bin")
+
+    // Extract assets to filesDir once per install (check existence first).
+    if (!modelPath.exists()) {
+      try {
+        context.assets.open("kokoro-v1.0.int8.onnx").use { input ->
+          modelPath.outputStream().use { output -> input.copyTo(output) }
+        }
+      } catch (e: Exception) {
+        e.printStackTrace()
+      }
+    }
+    if (!voicesPath.exists()) {
+      try {
+        context.assets.open("voices-v1.0.bin").use { input ->
+          voicesPath.outputStream().use { output -> input.copyTo(output) }
+        }
+      } catch (e: Exception) {
+        e.printStackTrace()
+      }
+    }
+
+    var handle: Long = 0L
+    try {
+      val voiceData = loadVoiceEmbedding(voicesPath, "af_alloy")
+      handle = KokoroTtsEngine.nativeCreate(modelPath.absolutePath, voiceData)
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+    return KokoroTtsEngine(handle)
+  }
+
+  @Provides
+  @Singleton
+  fun provideAudioTrack(): AudioTrack {
+    return AudioTrack.Builder()
+      .setAudioAttributes(
+        AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_ASSISTANT)
+          .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+          .build()
+      )
+      .setAudioFormat(
+        AudioFormat.Builder()
+          .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+          .setSampleRate(24000)
+          .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+          .build()
+      )
+      .setBufferSizeInBytes(
+        AudioTrack.getMinBufferSize(
+          24000,
+          AudioFormat.CHANNEL_OUT_MONO,
+          AudioFormat.ENCODING_PCM_16BIT
+        ) * 4
+      )
+      .setTransferMode(AudioTrack.MODE_STREAM)
+      .build()
   }
 }
